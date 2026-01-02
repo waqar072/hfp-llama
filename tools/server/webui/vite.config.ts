@@ -16,7 +16,7 @@ const GUIDE_FOR_FRONTEND = `
 -->
 `.trim();
 
-const MAX_BUNDLE_SIZE = 2 * 1024 * 1024;
+const MAX_BUNDLE_SIZE = 5000 * 1024;
 
 /**
  * the maximum size of an embedded asset in bytes,
