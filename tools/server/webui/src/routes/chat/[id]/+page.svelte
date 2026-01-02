@@ -164,7 +164,7 @@
 </script>
 
 <svelte:head>
-	<title>{activeConversation()?.name || 'Chat'} - llama.cpp</title>
+	<title>{activeConversation()?.name || 'Chat'} - HFP</title>
 </svelte:head>
 
 <ChatScreen />
