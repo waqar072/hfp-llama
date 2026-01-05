@@ -1,6 +1,15 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { ChevronDown, EyeOff, Loader2, MicOff, Package, Power } from '@lucide/svelte';
+	import {
+		ChevronDown,
+		EyeOff,
+		Loader2,
+		MicOff,
+		Package,
+		Power,
+		Server,
+		Activity
+	} from '@lucide/svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
 	import { cn } from '$lib/components/ui/utils';
@@ -47,81 +56,96 @@
 		upToMessageId
 	}: Props = $props();
 
+	// --- Existing State ---
 	let options = $derived(modelOptions());
 	let loading = $derived(modelsLoading());
 	let updating = $derived(modelsUpdating());
 	let activeId = $derived(selectedModelId());
 	let isRouter = $derived(isRouterMode());
 	let serverModel = $derived(singleModelName());
-
-	// Reactive router models state - needed for proper reactivity of status checks
 	let currentRouterModels = $derived(routerModels());
 
 	let requiredModalities = $derived(
 		upToMessageId ? conversationsStore.getModalitiesUpToMessage(upToMessageId) : usedModalities()
 	);
 
+	// --- Cluster Node Logic ---
+	interface ClusterNode {
+		given_name: string;
+		status: string;
+	}
+
+	let nodes = $state<ClusterNode[]>([]);
+	let clusterSearchTerm = $state('');
+	let clusterOpen = $state(false);
+	let clusterSearchInputRef = $state<HTMLInputElement | null>(null);
+
+	// Filter nodes based on hidden list and search term
+	let filteredNodes = $derived(
+		nodes
+			.filter(
+				(n) =>
+					!['digital-ocean-server', 'server2-ritesh'].includes(n.given_name) &&
+					n.given_name.toLowerCase().includes(clusterSearchTerm.toLowerCase())
+			)
+			// Sort: Online/Healthy first, then others
+			.sort((a, b) =>
+				['online', 'healthy'].includes(a.status) === ['online', 'healthy'].includes(b.status)
+					? 0
+					: ['online', 'healthy'].includes(a.status)
+						? -1
+						: 1
+			)
+	);
+
+	// CHANGED: Filter out hidden servers BEFORE counting
+	let onlineCount = $derived(
+		nodes
+			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
+			.filter((n) => n.status === 'online' || n.status === 'healthy')
+			.length
+	);
+
+	// --- Existing Functions ---
 	function getModelStatus(modelId: string): ServerModelStatus | null {
 		const model = currentRouterModels.find((m) => m.id === modelId);
 		return (model?.status?.value as ServerModelStatus) ?? null;
 	}
 
-	/**
-	 * Checks if a model supports all modalities used in the conversation.
-	 * Returns true if the model can be selected, false if it should be disabled.
-	 */
 	function isModelCompatible(option: ModelOption): boolean {
 		void propsCacheVersion();
-
 		const modelModalities = modelsStore.getModelModalities(option.model);
-
 		if (!modelModalities) {
 			const status = getModelStatus(option.model);
-
 			if (status === ServerModelStatus.LOADED) {
 				if (requiredModalities.vision || requiredModalities.audio) return false;
 			}
-
 			return true;
 		}
-
 		if (requiredModalities.vision && !modelModalities.vision) return false;
 		if (requiredModalities.audio && !modelModalities.audio) return false;
-
 		return true;
 	}
 
-	/**
-	 * Gets missing modalities for a model.
-	 * Returns object with vision/audio booleans indicating what's missing.
-	 */
 	function getMissingModalities(option: ModelOption): { vision: boolean; audio: boolean } | null {
 		void propsCacheVersion();
-
 		const modelModalities = modelsStore.getModelModalities(option.model);
-
 		if (!modelModalities) {
 			const status = getModelStatus(option.model);
-
 			if (status === ServerModelStatus.LOADED) {
 				const missing = {
 					vision: requiredModalities.vision,
 					audio: requiredModalities.audio
 				};
-
 				if (missing.vision || missing.audio) return missing;
 			}
-
 			return null;
 		}
-
 		const missing = {
 			vision: requiredModalities.vision && !modelModalities.vision,
 			audio: requiredModalities.audio && !modelModalities.audio
 		};
-
 		if (!missing.vision && !missing.audio) return null;
-
 		return missing;
 	}
 
@@ -130,14 +154,12 @@
 			? false
 			: (() => {
 					const currentOption = options.find((option) => option.model === currentModel);
-
 					return currentOption ? currentOption.id === activeId : false;
 				})()
 	);
 
 	let isCurrentModelInCache = $derived(() => {
 		if (!isRouter || !currentModel) return true;
-
 		return options.some((option) => option.model === currentModel);
 	});
 
@@ -149,7 +171,6 @@
 		(() => {
 			const term = searchTerm.trim().toLowerCase();
 			if (!term) return options;
-
 			return options.filter(
 				(option) =>
 					option.model.toLowerCase().includes(term) || option.name?.toLowerCase().includes(term)
@@ -157,14 +178,12 @@
 		})()
 	);
 
-	// Get indices of compatible options for keyboard navigation
 	let compatibleIndices = $derived(
 		filteredOptions
 			.map((option, index) => (isModelCompatible(option) ? index : -1))
 			.filter((i) => i !== -1)
 	);
 
-	// Reset highlighted index when search term changes
 	$effect(() => {
 		void searchTerm;
 		highlightedIndex = -1;
@@ -174,13 +193,38 @@
 	let showModelDialog = $state(false);
 
 	onMount(() => {
+		// Load Models
 		modelsStore.fetch().catch((error) => {
 			console.error('Unable to load models:', error);
 		});
+
+		// Load Nodes
+		fetchNodes();
 	});
 
-	// Handle changes to the model selector pop-down or the model dialog, depending on if the server is in
-	// router mode or not.
+	async function fetchNodes() {
+		try {
+			const response = await fetch('https://ai.nomineelife.com/api/nodes');
+			if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+			nodes = await response.json();
+		} catch (error) {
+			console.error('Failed to fetch nodes:', error);
+		}
+	}
+
+	function handleClusterOpenChange(open: boolean) {
+		if (open) {
+			clusterOpen = true;
+			clusterSearchTerm = '';
+			fetchNodes(); // Refresh on open
+			tick().then(() => {
+				requestAnimationFrame(() => clusterSearchInputRef?.focus());
+			});
+		} else {
+			clusterOpen = false;
+		}
+	}
+
 	function handleOpenChange(open: boolean) {
 		if (loading || updating) return;
 
@@ -189,12 +233,9 @@
 				isOpen = true;
 				searchTerm = '';
 				highlightedIndex = -1;
-
-				// Focus search input after popover opens
 				tick().then(() => {
 					requestAnimationFrame(() => searchInputRef?.focus());
 				});
-
 				modelsStore.fetchRouterModels().then(() => {
 					modelsStore.fetchModalitiesForLoadedModels();
 				});
@@ -214,11 +255,9 @@
 
 	function handleSearchKeyDown(event: KeyboardEvent) {
 		if (event.isComposing) return;
-
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
 			if (compatibleIndices.length === 0) return;
-
 			const currentPos = compatibleIndices.indexOf(highlightedIndex);
 			if (currentPos === -1 || currentPos === compatibleIndices.length - 1) {
 				highlightedIndex = compatibleIndices[0];
@@ -228,7 +267,6 @@
 		} else if (event.key === 'ArrowUp') {
 			event.preventDefault();
 			if (compatibleIndices.length === 0) return;
-
 			const currentPos = compatibleIndices.indexOf(highlightedIndex);
 			if (currentPos === -1 || currentPos === 0) {
 				highlightedIndex = compatibleIndices[compatibleIndices.length - 1];
@@ -243,7 +281,6 @@
 					handleSelect(option.id);
 				}
 			} else if (compatibleIndices.length > 0) {
-				// No selection - highlight first compatible option
 				highlightedIndex = compatibleIndices[0];
 			}
 		}
@@ -256,18 +293,12 @@
 		let shouldCloseMenu = true;
 
 		if (onModelChange) {
-			// If callback provided, use it (for regenerate functionality)
 			const result = await onModelChange(option.id, option.model);
-
-			// If callback returns false, keep menu open (validation failed)
 			if (result === false) {
 				shouldCloseMenu = false;
 			}
 		} else {
-			// Update global selection
 			await modelsStore.selectModelById(option.id);
-
-			// Load the model if not already loaded (router mode)
 			if (isRouter && getModelStatus(option.model) !== ServerModelStatus.LOADED) {
 				try {
 					await modelsStore.loadModel(option.model);
@@ -279,8 +310,6 @@
 
 		if (shouldCloseMenu) {
 			handleOpenChange(false);
-
-			// Focus the chat textarea after model selection
 			requestAnimationFrame(() => {
 				const textarea = document.querySelector<HTMLTextAreaElement>(
 					'[data-slot="chat-form"] textarea'
@@ -297,21 +326,17 @@
 					id: 'current',
 					model: serverModel,
 					name: serverModel.split('/').pop() || serverModel,
-					capabilities: [] // Empty array for single model mode
+					capabilities: []
 				};
 			}
-
 			return undefined;
 		}
 
-		// When useGlobalSelection is true (form selector), prioritize user selection
-		// Otherwise (message display), prioritize currentModel
 		if (useGlobalSelection && activeId) {
 			const selected = options.find((option) => option.id === activeId);
 			if (selected) return selected;
 		}
 
-		// Show currentModel (from message payload or conversation)
 		if (currentModel) {
 			if (!isCurrentModelInCache()) {
 				return {
@@ -321,21 +346,101 @@
 					capabilities: []
 				};
 			}
-
 			return options.find((option) => option.model === currentModel);
 		}
 
-		// Fallback to user selection (for new chats before first message)
 		if (activeId) {
 			return options.find((option) => option.id === activeId);
 		}
-
-		// No selection - return undefined to show "Select model"
 		return undefined;
 	}
 </script>
 
-<div class={cn('relative inline-flex flex-col items-end gap-1', className)}>
+<div class={cn('relative inline-flex flex-row items-center gap-1', className)}>
+	
+	<Popover.Root bind:open={clusterOpen} onOpenChange={handleClusterOpenChange}>
+		<Popover.Trigger
+			class={cn(
+				`inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`,
+				clusterOpen ? 'bg-muted text-foreground' : ''
+			)}
+		>
+			<div class="relative">
+				<Server class="h-4 w-4" />
+				<span
+					class={cn(
+						'absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border border-background',
+						onlineCount > 0 ? 'bg-green-500' : 'bg-muted-foreground/30'
+					)}
+				></span>
+			</div>
+		</Popover.Trigger>
+
+		<Popover.Content
+			class="w-72 p-0"
+			align="start"
+			sideOffset={8}
+		>
+			<div class="flex flex-col">
+				<div class="flex items-center justify-between border-b px-3 py-2">
+					<span class="text-xs font-semibold">Tailscale Cluster</span>
+					<div class="flex items-center gap-1.5">
+						<span
+							class={cn(
+								'h-1.5 w-1.5 rounded-full',
+								onlineCount > 0 ? 'bg-green-500' : 'bg-muted-foreground/30'
+							)}
+						></span>
+						<span class="text-xs text-muted-foreground">{onlineCount} online</span>
+					</div>
+				</div>
+
+				<div class="border-b p-2">
+					<SearchInput
+						id="cluster-search"
+						placeholder="Search nodes..."
+						bind:value={clusterSearchTerm}
+						bind:ref={clusterSearchInputRef}
+					/>
+				</div>
+
+				<div class="max-h-60 overflow-y-auto py-1">
+					{#if filteredNodes.length === 0}
+						<div class="px-4 py-3 text-center text-sm text-muted-foreground">
+							No active nodes.
+						</div>
+					{:else}
+						{#each filteredNodes as node}
+							<div class="flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/50">
+								<span class="truncate font-medium">{node.given_name}</span>
+								<div class="flex items-center gap-2">
+									<span
+										class={cn(
+											'text-[10px] capitalize',
+											node.status === 'online' || node.status === 'healthy'
+												? 'text-green-500'
+												: 'text-muted-foreground'
+										)}
+									>
+										{node.status}
+									</span>
+									<span
+										class={cn(
+											'h-2 w-2 rounded-full',
+											node.status === 'online' || node.status === 'healthy'
+												? 'bg-green-500'
+												: 'bg-muted-foreground/30'
+										)}
+									></span>
+								</div>
+							</div>
+						{/each}
+					{/if}
+				</div>
+			</div>
+		</Popover.Content>
+	</Popover.Root>
+
 	{#if loading && options.length === 0 && isRouter}
 		<div class="flex items-center gap-2 text-xs text-muted-foreground">
 			<Loader2 class="h-3.5 w-3.5 animate-spin" />
@@ -399,7 +504,6 @@
 							class="models-list order-2 min-h-0 flex-1 overflow-y-auto group-data-[side=top]/popover-content:order-1"
 						>
 							{#if !isCurrentModelInCache() && currentModel}
-								<!-- Show unavailable model as first option (disabled) -->
 								<button
 									type="button"
 									class="flex w-full cursor-not-allowed items-center bg-red-400/10 px-4 py-2 text-left text-sm text-red-400"

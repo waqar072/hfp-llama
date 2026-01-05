@@ -164,7 +164,7 @@
 </script>
 
 <svelte:head>
-	<title>{activeConversation()?.name || 'Chat'} - HFP</title>
+	<title>{activeConversation()?.name || 'Chat'} - HFP AI</title>
 </svelte:head>
 
 <ChatScreen />
