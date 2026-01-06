@@ -7,8 +7,7 @@
 		MicOff,
 		Package,
 		Power,
-		Server,
-		Activity
+		Server
 	} from '@lucide/svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
@@ -32,17 +31,10 @@
 	interface Props {
 		class?: string;
 		currentModel?: string | null;
-		/** Callback when model changes. Return false to keep menu open (e.g., for validation failures) */
 		onModelChange?: (modelId: string, modelName: string) => Promise<boolean> | boolean | void;
 		disabled?: boolean;
 		forceForegroundText?: boolean;
-		/** When true, user's global selection takes priority over currentModel (for form selector) */
 		useGlobalSelection?: boolean;
-		/**
-		 * When provided, only consider modalities from messages BEFORE this message.
-		 * Used for regeneration - allows selecting models that don't support modalities
-		 * used in later messages.
-		 */
 		upToMessageId?: string;
 	}
 
@@ -69,10 +61,12 @@
 		upToMessageId ? conversationsStore.getModalitiesUpToMessage(upToMessageId) : usedModalities()
 	);
 
-	// --- Cluster Node Logic ---
+	// --- Cluster Node Logic (UPDATED) ---
 	interface ClusterNode {
 		given_name: string;
 		status: string;
+		model_name?: string;
+		model_status?: string;
 	}
 
 	let nodes = $state<ClusterNode[]>([]);
@@ -80,30 +74,30 @@
 	let clusterOpen = $state(false);
 	let clusterSearchInputRef = $state<HTMLInputElement | null>(null);
 
-	// Filter nodes based on hidden list and search term
+	// Filter nodes based on hidden list and search term (Checks Name AND Model Name now)
 	let filteredNodes = $derived(
 		nodes
-			.filter(
-				(n) =>
-					!['digital-ocean-server', 'server2-ritesh'].includes(n.given_name) &&
-					n.given_name.toLowerCase().includes(clusterSearchTerm.toLowerCase())
-			)
+			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
+			.filter((n) => {
+				const term = clusterSearchTerm.toLowerCase();
+				const nameMatch = n.given_name.toLowerCase().includes(term);
+				const modelMatch = n.model_name?.toLowerCase().includes(term);
+				return nameMatch || modelMatch;
+			})
 			// Sort: Online/Healthy first, then others
-			.sort((a, b) =>
-				['online', 'healthy'].includes(a.status) === ['online', 'healthy'].includes(b.status)
-					? 0
-					: ['online', 'healthy'].includes(a.status)
-						? -1
-						: 1
-			)
+			.sort((a, b) => {
+				const isAOnline = ['online', 'healthy'].includes(a.status);
+				const isBOnline = ['online', 'healthy'].includes(b.status);
+				if (isAOnline === isBOnline) return 0;
+				return isAOnline ? -1 : 1;
+			})
 	);
 
-	// CHANGED: Filter out hidden servers BEFORE counting
+	// Count includes both 'online' and 'healthy' statuses
 	let onlineCount = $derived(
 		nodes
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			.filter((n) => n.status === 'online' || n.status === 'healthy')
-			.length
+			.filter((n) => n.status === 'online' || n.status === 'healthy').length
 	);
 
 	// --- Existing Functions ---
@@ -411,8 +405,23 @@
 						</div>
 					{:else}
 						{#each filteredNodes as node}
-							<div class="flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/50">
-								<span class="truncate font-medium">{node.given_name}</span>
+							<div 
+								class="flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/50"
+								title={node.model_name ? `Running: ${node.model_name}` : 'No model info'}
+							>
+								
+								
+							<div class="flex flex-col min-w-0 pr-2">
+    							<span class="truncate font-medium">{node.given_name}</span>
+   		     					  {#if node.model_name}
+  						            <span class="truncate text-[10px] text-muted-foreground opacity-80">
+           						      {node.model_name}
+       							    </span>
+    							  {/if}
+							</div>
+
+
+
 								<div class="flex items-center gap-2">
 									<span
 										class={cn(
