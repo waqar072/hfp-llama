@@ -457,9 +457,7 @@
 				<h1 class="mb-4 text-3xl font-semibold tracking-tight">HealthFirstPriority</h1>
 
 				<p class="text-lg text-muted-foreground">
-					{serverStore.props?.modalities?.audio
-						? 'Record audio, type a message '
-						: 'Type a message'} or upload files to get started
+   				 I am a health-related AI. Please ask medical questions or upload health records to get started.
 				</p>
 			</div>
 
