@@ -81,18 +81,18 @@
 		nodes
 			// 1. Hide specific servers
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			
-			// 2. ADD THIS LINE: Only show nodes that actually have a model loaded
-			.filter((n) => n.model_name && n.model_name.trim() !== '')
 
-			// 3. Search filter (unchanged)
+			// 2. NEW: Only show nodes where Model is NOT 'N/A' AND Status is 'Healthy'
+			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
+
+			// 3. Search filter
 			.filter((n) => {
 				const term = clusterSearchTerm.toLowerCase();
 				const nameMatch = n.given_name.toLowerCase().includes(term);
 				const modelMatch = n.model_name?.toLowerCase().includes(term);
 				return nameMatch || modelMatch;
 			})
-			// 4. Sort (unchanged)
+			// 4. Sort: Online/Healthy first (though likely all are healthy now due to filter)
 			.sort((a, b) => {
 				const isAOnline = ['online', 'healthy'].includes(a.status);
 				const isBOnline = ['online', 'healthy'].includes(b.status);
@@ -101,11 +101,14 @@
 			})
 	);
 
-	// Count includes both 'online' and 'healthy' statuses
+    // FIXED: Count now strictly matches the list filter
+	// (Must be online AND have a valid, healthy model)
 	let onlineCount = $derived(
 		nodes
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			.filter((n) => n.status === 'online' || n.status === 'healthy').length
+			.filter((n) => n.status === 'online' || n.status === 'healthy')
+			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
+			.length
 	);
 
 	// --- Existing Functions ---
@@ -195,13 +198,19 @@
 	let showModelDialog = $state(false);
 
 	onMount(() => {
-		// Load Models
+		// 1. Load Models
 		modelsStore.fetch().catch((error) => {
 			console.error('Unable to load models:', error);
 		});
 
-		// Load Nodes
+		// 2. Initial Node Fetch
 		fetchNodes();
+
+		// 3. NEW: Auto-update every 10 seconds (10000 ms)
+		const interval = setInterval(fetchNodes, 10000);
+
+		// 4. Cleanup: Stop updating when the user leaves the page
+		return () => clearInterval(interval);
 	});
 
 	async function fetchNodes() {
