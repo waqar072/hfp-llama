@@ -75,16 +75,24 @@
 	let clusterSearchInputRef = $state<HTMLInputElement | null>(null);
 
 	// Filter nodes based on hidden list and search term (Checks Name AND Model Name now)
+	
+
 	let filteredNodes = $derived(
 		nodes
+			// 1. Hide specific servers
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
+			
+			// 2. ADD THIS LINE: Only show nodes that actually have a model loaded
+			.filter((n) => n.model_name && n.model_name.trim() !== '')
+
+			// 3. Search filter (unchanged)
 			.filter((n) => {
 				const term = clusterSearchTerm.toLowerCase();
 				const nameMatch = n.given_name.toLowerCase().includes(term);
 				const modelMatch = n.model_name?.toLowerCase().includes(term);
 				return nameMatch || modelMatch;
 			})
-			// Sort: Online/Healthy first, then others
+			// 4. Sort (unchanged)
 			.sort((a, b) => {
 				const isAOnline = ['online', 'healthy'].includes(a.status);
 				const isBOnline = ['online', 'healthy'].includes(b.status);
