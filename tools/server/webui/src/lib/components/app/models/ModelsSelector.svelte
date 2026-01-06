@@ -61,7 +61,7 @@
 		upToMessageId ? conversationsStore.getModalitiesUpToMessage(upToMessageId) : usedModalities()
 	);
 
-	// --- Cluster Node Logic (UPDATED) ---
+	// --- Cluster & Live Model Logic ---
 	interface ClusterNode {
 		given_name: string;
 		status: string;
@@ -70,29 +70,21 @@
 	}
 
 	let nodes = $state<ClusterNode[]>([]);
+	let liveModelName = $state<string | null>(null);
 	let clusterSearchTerm = $state('');
 	let clusterOpen = $state(false);
 	let clusterSearchInputRef = $state<HTMLInputElement | null>(null);
 
-	// Filter nodes based on hidden list and search term (Checks Name AND Model Name now)
-	
-
 	let filteredNodes = $derived(
 		nodes
-			// 1. Hide specific servers
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-
-			// 2. NEW: Only show nodes where Model is NOT 'N/A' AND Status is 'Healthy'
 			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
-
-			// 3. Search filter
 			.filter((n) => {
 				const term = clusterSearchTerm.toLowerCase();
 				const nameMatch = n.given_name.toLowerCase().includes(term);
 				const modelMatch = n.model_name?.toLowerCase().includes(term);
 				return nameMatch || modelMatch;
 			})
-			// 4. Sort: Online/Healthy first (though likely all are healthy now due to filter)
 			.sort((a, b) => {
 				const isAOnline = ['online', 'healthy'].includes(a.status);
 				const isBOnline = ['online', 'healthy'].includes(b.status);
@@ -101,8 +93,6 @@
 			})
 	);
 
-    // FIXED: Count now strictly matches the list filter
-	// (Must be online AND have a valid, healthy model)
 	let onlineCount = $derived(
 		nodes
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
@@ -110,6 +100,12 @@
 			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
 			.length
 	);
+
+	// --- Helper Function to Remove Extension ---
+	function formatModelName(name: string | null | undefined): string {
+		if (!name) return '';
+		return name.replace(/\.gguf$/i, '');
+	}
 
 	// --- Existing Functions ---
 	function getModelStatus(modelId: string): ServerModelStatus | null {
@@ -198,18 +194,19 @@
 	let showModelDialog = $state(false);
 
 	onMount(() => {
-		// 1. Load Models
 		modelsStore.fetch().catch((error) => {
 			console.error('Unable to load models:', error);
 		});
 
-		// 2. Initial Node Fetch
 		fetchNodes();
+		fetchLiveModel();
 
-		// 3. NEW: Auto-update every 10 seconds (10000 ms)
-		const interval = setInterval(fetchNodes, 10000);
+		// Changed refresh time from 5000 to 10000 (10 seconds)
+		const interval = setInterval(() => {
+			fetchNodes();
+			fetchLiveModel();
+		}, 10000);
 
-		// 4. Cleanup: Stop updating when the user leaves the page
 		return () => clearInterval(interval);
 	});
 
@@ -223,11 +220,25 @@
 		}
 	}
 
+	async function fetchLiveModel() {
+		try {
+			const response = await fetch('https://ai.nomineelife.com/v1/models');
+			if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+			
+			const data = await response.json();
+			if (data && data.data && data.data.length > 0) {
+				liveModelName = data.data[0].id;
+			}
+		} catch (error) {
+			console.error('Failed to fetch live model:', error);
+		}
+	}
+
 	function handleClusterOpenChange(open: boolean) {
 		if (open) {
 			clusterOpen = true;
 			clusterSearchTerm = '';
-			fetchNodes(); // Refresh on open
+			fetchNodes();
 			tick().then(() => {
 				requestAnimationFrame(() => clusterSearchInputRef?.focus());
 			});
@@ -256,7 +267,7 @@
 				highlightedIndex = -1;
 			}
 		} else {
-			showModelDialog = open;
+			// Dialog disabled
 		}
 	}
 
@@ -422,22 +433,23 @@
 						</div>
 					{:else}
 						{#each filteredNodes as node}
-							<div 
-								class="flex items-center justify-between px-3 py-2 text-sm hover:bg-muted/50"
+							<div
+								class={cn(
+									'flex items-center justify-between px-3 py-2 text-sm border-l-2',
+									liveModelName === node.model_name
+										? 'bg-primary/10 border-primary'
+										: 'hover:bg-muted/50 border-transparent'
+								)}
 								title={node.model_name ? `Running: ${node.model_name}` : 'No model info'}
 							>
-								
-								
-							<div class="flex flex-col min-w-0 pr-2">
-    							<span class="truncate font-medium">{node.given_name}</span>
-   		     					  {#if node.model_name}
-  						            <span class="truncate text-[10px] text-muted-foreground opacity-80">
-           						      {node.model_name}
-       							    </span>
-    							  {/if}
-							</div>
-
-
+								<div class="flex flex-col min-w-0 pr-2">
+									<span class="truncate font-medium">{node.given_name}</span>
+									{#if node.model_name}
+										<span class="truncate text-[10px] text-muted-foreground opacity-80">
+											{formatModelName(node.model_name)}
+										</span>
+									{/if}
+								</div>
 
 								<div class="flex items-center gap-2">
 									<span
@@ -652,24 +664,22 @@
 		{:else}
 			<button
 				class={cn(
-					`inline-flex cursor-pointer items-center gap-1.5 rounded-sm bg-muted-foreground/10 px-1.5 py-1 text-xs transition hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60`,
+					`inline-flex cursor-default items-center gap-1.5 rounded-sm bg-muted-foreground/10 px-1.5 py-1 text-xs transition focus:outline-none`,
 					!isCurrentModelInCache()
 						? 'bg-red-400/10 !text-red-400 hover:bg-red-400/20 hover:text-red-400'
 						: forceForegroundText
 							? 'text-foreground'
 							: isHighlightedCurrentModelActive
 								? 'text-foreground'
-								: 'text-muted-foreground',
-					isOpen ? 'text-foreground' : ''
+								: 'text-muted-foreground'
 				)}
 				style="max-width: min(calc(100cqw - 6.5rem), 32rem)"
-				onclick={() => handleOpenChange(true)}
 				disabled={disabled || updating}
 			>
 				<Package class="h-3.5 w-3.5" />
 
 				<span class="truncate font-medium">
-					{selectedOption?.model}
+					{formatModelName(liveModelName || selectedOption?.model) || 'Select model'}
 				</span>
 
 				{#if updating}
@@ -679,7 +689,3 @@
 		{/if}
 	{/if}
 </div>
-
-{#if showModelDialog && !isRouter}
-	<DialogModelInformation bind:open={showModelDialog} />
-{/if}
