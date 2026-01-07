@@ -457,7 +457,7 @@
 				<h1 class="mb-4 text-3xl font-semibold tracking-tight">HealthFirstPriority</h1>
 
 				<p class="text-lg text-muted-foreground">
-   				 I am a health-related AI. Please ask medical questions or upload health records to get started.
+   				 Upload your health records or ask any medical question to get started.
 				</p>
 			</div>
 

@@ -2,690 +2,250 @@
 	import { onMount, tick } from 'svelte';
 	import {
 		ChevronDown,
-		EyeOff,
 		Loader2,
-		MicOff,
 		Package,
-		Power,
-		Server
+		Check,
+		Server,
+		Monitor
 	} from '@lucide/svelte';
-	import * as Tooltip from '$lib/components/ui/tooltip';
 	import * as Popover from '$lib/components/ui/popover';
 	import { cn } from '$lib/components/ui/utils';
 	import {
 		modelsStore,
-		modelOptions,
 		modelsLoading,
 		modelsUpdating,
-		selectedModelId,
-		routerModels,
-		propsCacheVersion,
-		singleModelName
 	} from '$lib/stores/models.svelte';
-	import { usedModalities, conversationsStore } from '$lib/stores/conversations.svelte';
-	import { ServerModelStatus } from '$lib/enums';
-	import { isRouterMode } from '$lib/stores/server.svelte';
-	import { DialogModelInformation, SearchInput } from '$lib/components/app';
-	import type { ModelOption } from '$lib/types/models';
+	import { targetNode } from '$lib/stores/server.svelte';
+	import { SearchInput } from '$lib/components/app';
 
 	interface Props {
 		class?: string;
-		currentModel?: string | null;
-		onModelChange?: (modelId: string, modelName: string) => Promise<boolean> | boolean | void;
 		disabled?: boolean;
 		forceForegroundText?: boolean;
-		useGlobalSelection?: boolean;
-		upToMessageId?: string;
 	}
 
 	let {
 		class: className = '',
-		currentModel = null,
-		onModelChange,
 		disabled = false,
 		forceForegroundText = false,
-		useGlobalSelection = false,
-		upToMessageId
 	}: Props = $props();
 
-	// --- Existing State ---
-	let options = $derived(modelOptions());
+	// --- State ---
 	let loading = $derived(modelsLoading());
 	let updating = $derived(modelsUpdating());
-	let activeId = $derived(selectedModelId());
-	let isRouter = $derived(isRouterMode());
-	let serverModel = $derived(singleModelName());
-	let currentRouterModels = $derived(routerModels());
 
-	let requiredModalities = $derived(
-		upToMessageId ? conversationsStore.getModalitiesUpToMessage(upToMessageId) : usedModalities()
-	);
-
-	// --- Cluster & Live Model Logic ---
 	interface ClusterNode {
 		given_name: string;
 		status: string;
 		model_name?: string;
 		model_status?: string;
+		address: string;
 	}
 
 	let nodes = $state<ClusterNode[]>([]);
 	let liveModelName = $state<string | null>(null);
-	let clusterSearchTerm = $state('');
-	let clusterOpen = $state(false);
-	let clusterSearchInputRef = $state<HTMLInputElement | null>(null);
+	let isOpen = $state(false);
+	
+	// Search State
+	let searchTerm = $state('');
+	let searchInputRef = $state<HTMLInputElement | null>(null);
 
-	let filteredNodes = $derived(
+	// --- Filter Logic ---
+	let sortedNodes = $derived(
 		nodes
+			// 1. Remove specific ignored servers
 			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
+			
+			// 2. Strict Status Filter (Online/Healthy Only)
 			.filter((n) => {
-				const term = clusterSearchTerm.toLowerCase();
-				const nameMatch = n.given_name.toLowerCase().includes(term);
-				const modelMatch = n.model_name?.toLowerCase().includes(term);
-				return nameMatch || modelMatch;
+				const nodeStatus = (n.status || '').toLowerCase();
+				const modelStatus = (n.model_status || '').toLowerCase();
+				const modelName = (n.model_name || '');
+
+				const isNodeUp = nodeStatus === 'online' || nodeStatus === 'healthy';
+				const isModelUp = modelStatus === 'online' || modelStatus === 'healthy';
+				const hasValidModel = modelName !== 'N/A' && modelName !== '';
+
+				return isNodeUp && isModelUp && hasValidModel;
 			})
-			.sort((a, b) => {
-				const isAOnline = ['online', 'healthy'].includes(a.status);
-				const isBOnline = ['online', 'healthy'].includes(b.status);
-				if (isAOnline === isBOnline) return 0;
-				return isAOnline ? -1 : 1;
+
+			// 3. Search Filter
+			.filter((n) => {
+				const term = searchTerm.toLowerCase();
+				return n.given_name.toLowerCase().includes(term) || 
+					   (n.model_name || '').toLowerCase().includes(term);
 			})
+
+			// 4. Sort Alphabetically
+			.sort((a, b) => a.given_name.localeCompare(b.given_name))
 	);
 
-	let onlineCount = $derived(
-		nodes
-			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			.filter((n) => n.status === 'online' || n.status === 'healthy')
-			.filter((n) => n.model_name !== 'N/A' && n.model_status === 'Healthy')
-			.length
-	);
-
-	// --- Helper Function to Remove Extension ---
 	function formatModelName(name: string | null | undefined): string {
-		if (!name) return '';
+		if (!name) return 'Loading...';
 		return name.replace(/\.gguf$/i, '');
 	}
 
-	// --- Existing Functions ---
-	function getModelStatus(modelId: string): ServerModelStatus | null {
-		const model = currentRouterModels.find((m) => m.id === modelId);
-		return (model?.status?.value as ServerModelStatus) ?? null;
-	}
-
-	function isModelCompatible(option: ModelOption): boolean {
-		void propsCacheVersion();
-		const modelModalities = modelsStore.getModelModalities(option.model);
-		if (!modelModalities) {
-			const status = getModelStatus(option.model);
-			if (status === ServerModelStatus.LOADED) {
-				if (requiredModalities.vision || requiredModalities.audio) return false;
-			}
-			return true;
+	function toggleNodeSelection(address: string) {
+		if (targetNode.address === address) {
+			targetNode.address = null; // Toggle off (Auto)
+		} else {
+			targetNode.address = address; // Toggle on
 		}
-		if (requiredModalities.vision && !modelModalities.vision) return false;
-		if (requiredModalities.audio && !modelModalities.audio) return false;
-		return true;
+		isOpen = false; // Close dropdown
+		fetchLiveModel(); // Update model name immediately
 	}
-
-	function getMissingModalities(option: ModelOption): { vision: boolean; audio: boolean } | null {
-		void propsCacheVersion();
-		const modelModalities = modelsStore.getModelModalities(option.model);
-		if (!modelModalities) {
-			const status = getModelStatus(option.model);
-			if (status === ServerModelStatus.LOADED) {
-				const missing = {
-					vision: requiredModalities.vision,
-					audio: requiredModalities.audio
-				};
-				if (missing.vision || missing.audio) return missing;
-			}
-			return null;
-		}
-		const missing = {
-			vision: requiredModalities.vision && !modelModalities.vision,
-			audio: requiredModalities.audio && !modelModalities.audio
-		};
-		if (!missing.vision && !missing.audio) return null;
-		return missing;
-	}
-
-	let isHighlightedCurrentModelActive = $derived(
-		!isRouter || !currentModel
-			? false
-			: (() => {
-					const currentOption = options.find((option) => option.model === currentModel);
-					return currentOption ? currentOption.id === activeId : false;
-				})()
-	);
-
-	let isCurrentModelInCache = $derived(() => {
-		if (!isRouter || !currentModel) return true;
-		return options.some((option) => option.model === currentModel);
-	});
-
-	let searchTerm = $state('');
-	let searchInputRef = $state<HTMLInputElement | null>(null);
-	let highlightedIndex = $state<number>(-1);
-
-	let filteredOptions: ModelOption[] = $derived(
-		(() => {
-			const term = searchTerm.trim().toLowerCase();
-			if (!term) return options;
-			return options.filter(
-				(option) =>
-					option.model.toLowerCase().includes(term) || option.name?.toLowerCase().includes(term)
-			);
-		})()
-	);
-
-	let compatibleIndices = $derived(
-		filteredOptions
-			.map((option, index) => (isModelCompatible(option) ? index : -1))
-			.filter((i) => i !== -1)
-	);
-
-	$effect(() => {
-		void searchTerm;
-		highlightedIndex = -1;
-	});
-
-	let isOpen = $state(false);
-	let showModelDialog = $state(false);
-
-	onMount(() => {
-		modelsStore.fetch().catch((error) => {
-			console.error('Unable to load models:', error);
-		});
-
-		fetchNodes();
-		fetchLiveModel();
-
-		// Changed refresh time from 5000 to 10000 (10 seconds)
-		const interval = setInterval(() => {
-			fetchNodes();
-			fetchLiveModel();
-		}, 10000);
-
-		return () => clearInterval(interval);
-	});
 
 	async function fetchNodes() {
 		try {
 			const response = await fetch('https://ai.nomineelife.com/api/nodes');
-			if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+			if (!response.ok) throw new Error('Failed to fetch nodes');
 			nodes = await response.json();
 		} catch (error) {
-			console.error('Failed to fetch nodes:', error);
+			console.error('Fetch nodes error:', error);
 		}
 	}
 
 	async function fetchLiveModel() {
 		try {
-			const response = await fetch('https://ai.nomineelife.com/v1/models');
-			if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+			const headers: Record<string, string> = {};
+			if (targetNode.address) {
+				headers['X-Target-Node'] = targetNode.address;
+			}
+
+			const response = await fetch('https://ai.nomineelife.com/v1/models', { headers });
+			if (!response.ok) return; 
 			
 			const data = await response.json();
-			if (data && data.data && data.data.length > 0) {
+			if (data?.data?.length > 0) {
 				liveModelName = data.data[0].id;
 			}
 		} catch (error) {
-			console.error('Failed to fetch live model:', error);
-		}
-	}
-
-	function handleClusterOpenChange(open: boolean) {
-		if (open) {
-			clusterOpen = true;
-			clusterSearchTerm = '';
-			fetchNodes();
-			tick().then(() => {
-				requestAnimationFrame(() => clusterSearchInputRef?.focus());
-			});
-		} else {
-			clusterOpen = false;
+			console.error('Fetch model error:', error);
 		}
 	}
 
 	function handleOpenChange(open: boolean) {
 		if (loading || updating) return;
-
-		if (isRouter) {
-			if (open) {
-				isOpen = true;
-				searchTerm = '';
-				highlightedIndex = -1;
-				tick().then(() => {
-					requestAnimationFrame(() => searchInputRef?.focus());
-				});
-				modelsStore.fetchRouterModels().then(() => {
-					modelsStore.fetchModalitiesForLoadedModels();
-				});
-			} else {
-				isOpen = false;
-				searchTerm = '';
-				highlightedIndex = -1;
-			}
-		} else {
-			// Dialog disabled
-		}
-	}
-
-	export function open() {
-		handleOpenChange(true);
-	}
-
-	function handleSearchKeyDown(event: KeyboardEvent) {
-		if (event.isComposing) return;
-		if (event.key === 'ArrowDown') {
-			event.preventDefault();
-			if (compatibleIndices.length === 0) return;
-			const currentPos = compatibleIndices.indexOf(highlightedIndex);
-			if (currentPos === -1 || currentPos === compatibleIndices.length - 1) {
-				highlightedIndex = compatibleIndices[0];
-			} else {
-				highlightedIndex = compatibleIndices[currentPos + 1];
-			}
-		} else if (event.key === 'ArrowUp') {
-			event.preventDefault();
-			if (compatibleIndices.length === 0) return;
-			const currentPos = compatibleIndices.indexOf(highlightedIndex);
-			if (currentPos === -1 || currentPos === 0) {
-				highlightedIndex = compatibleIndices[compatibleIndices.length - 1];
-			} else {
-				highlightedIndex = compatibleIndices[currentPos - 1];
-			}
-		} else if (event.key === 'Enter') {
-			event.preventDefault();
-			if (highlightedIndex >= 0 && highlightedIndex < filteredOptions.length) {
-				const option = filteredOptions[highlightedIndex];
-				if (isModelCompatible(option)) {
-					handleSelect(option.id);
-				}
-			} else if (compatibleIndices.length > 0) {
-				highlightedIndex = compatibleIndices[0];
-			}
-		}
-	}
-
-	async function handleSelect(modelId: string) {
-		const option = options.find((opt) => opt.id === modelId);
-		if (!option) return;
-
-		let shouldCloseMenu = true;
-
-		if (onModelChange) {
-			const result = await onModelChange(option.id, option.model);
-			if (result === false) {
-				shouldCloseMenu = false;
-			}
-		} else {
-			await modelsStore.selectModelById(option.id);
-			if (isRouter && getModelStatus(option.model) !== ServerModelStatus.LOADED) {
-				try {
-					await modelsStore.loadModel(option.model);
-				} catch (error) {
-					console.error('Failed to load model:', error);
-				}
-			}
-		}
-
-		if (shouldCloseMenu) {
-			handleOpenChange(false);
-			requestAnimationFrame(() => {
-				const textarea = document.querySelector<HTMLTextAreaElement>(
-					'[data-slot="chat-form"] textarea'
-				);
-				textarea?.focus();
+		isOpen = open;
+		if (open) {
+			searchTerm = '';
+			fetchNodes();
+			tick().then(() => {
+				requestAnimationFrame(() => searchInputRef?.focus());
 			});
 		}
 	}
 
-	function getDisplayOption(): ModelOption | undefined {
-		if (!isRouter) {
-			if (serverModel) {
-				return {
-					id: 'current',
-					model: serverModel,
-					name: serverModel.split('/').pop() || serverModel,
-					capabilities: []
-				};
-			}
-			return undefined;
-		}
+	onMount(() => {
+		modelsStore.fetch().catch(() => {});
+		fetchNodes();
+		fetchLiveModel();
 
-		if (useGlobalSelection && activeId) {
-			const selected = options.find((option) => option.id === activeId);
-			if (selected) return selected;
-		}
+		const interval = setInterval(() => {
+			fetchLiveModel();
+			if (isOpen) fetchNodes();
+		}, 5000);
 
-		if (currentModel) {
-			if (!isCurrentModelInCache()) {
-				return {
-					id: 'not-in-cache',
-					model: currentModel,
-					name: currentModel.split('/').pop() || currentModel,
-					capabilities: []
-				};
-			}
-			return options.find((option) => option.model === currentModel);
-		}
+		return () => clearInterval(interval);
+	});
 
-		if (activeId) {
-			return options.find((option) => option.id === activeId);
+	$effect(() => {
+		if (targetNode.address || !targetNode.address) {
+			fetchLiveModel();
 		}
-		return undefined;
-	}
+	});
 </script>
 
 <div class={cn('relative inline-flex flex-row items-center gap-1', className)}>
-	
-	<Popover.Root bind:open={clusterOpen} onOpenChange={handleClusterOpenChange}>
+	<Popover.Root bind:open={isOpen} onOpenChange={handleOpenChange}>
 		<Popover.Trigger
 			class={cn(
-				`inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-md text-muted-foreground transition hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`,
-				clusterOpen ? 'bg-muted text-foreground' : ''
+				`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50`,
+				targetNode.address 
+					? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-300' 
+					: 'bg-background border-border hover:bg-muted/50',
+				forceForegroundText ? 'text-foreground' : '',
 			)}
+			disabled={disabled || updating}
 		>
-			<div class="relative">
-				<Server class="h-4 w-4" />
-				<span
-					class={cn(
-						'absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border border-background',
-						onlineCount > 0 ? 'bg-green-500' : 'bg-muted-foreground/30'
-					)}
-				></span>
-			</div>
+			{#if targetNode.address}
+				<Server class="h-4 w-4 shrink-0" />
+			{:else}
+				<Package class="h-4 w-4 shrink-0" />
+			{/if}
+
+			<span class="font-medium truncate max-w-[400px]">
+				{formatModelName(liveModelName)}
+			</span>
+
+			{#if updating}
+				<Loader2 class="h-4 w-4 shrink-0 animate-spin opacity-50" />
+			{:else}
+				<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
+			{/if}
 		</Popover.Trigger>
 
 		<Popover.Content
-			class="w-72 p-0"
-			align="start"
-			sideOffset={8}
+			class="w-[320px] p-0 shadow-lg rounded-lg overflow-hidden"
+			align="end"
+			sideOffset={5}
 		>
 			<div class="flex flex-col">
-				<div class="flex items-center justify-between border-b px-3 py-2">
-					<span class="text-xs font-semibold">Tailscale Cluster</span>
-					<div class="flex items-center gap-1.5">
-						<span
-							class={cn(
-								'h-1.5 w-1.5 rounded-full',
-								onlineCount > 0 ? 'bg-green-500' : 'bg-muted-foreground/30'
-							)}
-						></span>
-						<span class="text-xs text-muted-foreground">{onlineCount} online</span>
-					</div>
+				<div class="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 border-b flex justify-between items-center">
+					<span>Select Processing Node</span>
+					<span class="bg-primary/10 text-primary px-1.5 py-0.5 rounded text-[10px] tabular-nums">
+						{sortedNodes.length} Online
+					</span>
 				</div>
 
-				<div class="border-b p-2">
+				<div class="p-2 border-b">
 					<SearchInput
-						id="cluster-search"
+						id="node-search"
 						placeholder="Search nodes..."
-						bind:value={clusterSearchTerm}
-						bind:ref={clusterSearchInputRef}
+						bind:value={searchTerm}
+						bind:ref={searchInputRef}
 					/>
 				</div>
 
-				<div class="max-h-60 overflow-y-auto py-1">
-					{#if filteredNodes.length === 0}
-						<div class="px-4 py-3 text-center text-sm text-muted-foreground">
-							No active nodes.
-						</div>
-					{:else}
-						{#each filteredNodes as node}
-							<div
-								class={cn(
-									'flex items-center justify-between px-3 py-2 text-sm border-l-2',
-									liveModelName === node.model_name
-										? 'bg-primary/10 border-primary'
-										: 'hover:bg-muted/50 border-transparent'
-								)}
-								title={node.model_name ? `Running: ${node.model_name}` : 'No model info'}
-							>
-								<div class="flex flex-col min-w-0 pr-2">
-									<span class="truncate font-medium">{node.given_name}</span>
+				<div class="max-h-[300px] overflow-y-auto p-1">
+					{#each sortedNodes as node}
+						{@const isSelected = targetNode.address === node.address}
+						
+						<button
+							type="button"
+							class={cn(
+								"flex w-full items-center justify-between rounded-md px-2 py-2 text-sm transition-colors text-left",
+								isSelected 
+									? "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" 
+									: "hover:bg-muted text-foreground"
+							)}
+							onclick={() => toggleNodeSelection(node.address)}
+						>
+							<div class="flex items-center gap-3 min-w-0 overflow-hidden">
+								<Monitor class={cn("h-4 w-4 shrink-0 text-green-500")} />
+								<div class="flex flex-col min-w-0">
+									<span class="font-medium truncate block">{node.given_name}</span>
 									{#if node.model_name}
-										<span class="truncate text-[10px] text-muted-foreground opacity-80">
+										<span class="text-[10px] opacity-70 truncate block">
 											{formatModelName(node.model_name)}
 										</span>
 									{/if}
 								</div>
-
-								<div class="flex items-center gap-2">
-									<span
-										class={cn(
-											'text-[10px] capitalize',
-											node.status === 'online' || node.status === 'healthy'
-												? 'text-green-500'
-												: 'text-muted-foreground'
-										)}
-									>
-										{node.status}
-									</span>
-									<span
-										class={cn(
-											'h-2 w-2 rounded-full',
-											node.status === 'online' || node.status === 'healthy'
-												? 'bg-green-500'
-												: 'bg-muted-foreground/30'
-										)}
-									></span>
-								</div>
 							</div>
-						{/each}
+							
+							{#if isSelected}
+								<Check class="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
+							{/if}
+						</button>
+					{/each}
+
+					{#if sortedNodes.length === 0}
+						<div class="p-4 text-center text-sm text-muted-foreground">
+							No healthy nodes found.
+						</div>
 					{/if}
 				</div>
 			</div>
 		</Popover.Content>
 	</Popover.Root>
-
-	{#if loading && options.length === 0 && isRouter}
-		<div class="flex items-center gap-2 text-xs text-muted-foreground">
-			<Loader2 class="h-3.5 w-3.5 animate-spin" />
-			Loading models…
-		</div>
-	{:else if options.length === 0 && isRouter}
-		<p class="text-xs text-muted-foreground">No models available.</p>
-	{:else}
-		{@const selectedOption = getDisplayOption()}
-
-		{#if isRouter}
-			<Popover.Root bind:open={isOpen} onOpenChange={handleOpenChange}>
-				<Popover.Trigger
-					class={cn(
-						`inline-flex cursor-pointer items-center gap-1.5 rounded-sm bg-muted-foreground/10 px-1.5 py-1 text-xs transition hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60`,
-						!isCurrentModelInCache()
-							? 'bg-red-400/10 !text-red-400 hover:bg-red-400/20 hover:text-red-400'
-							: forceForegroundText
-								? 'text-foreground'
-								: isHighlightedCurrentModelActive
-									? 'text-foreground'
-									: 'text-muted-foreground',
-						isOpen ? 'text-foreground' : ''
-					)}
-					style="max-width: min(calc(100cqw - 6.5rem), 32rem)"
-					disabled={disabled || updating}
-				>
-					<Package class="h-3.5 w-3.5" />
-
-					<span class="truncate font-medium">
-						{selectedOption?.model || 'Select model'}
-					</span>
-
-					{#if updating}
-						<Loader2 class="h-3 w-3.5 animate-spin" />
-					{:else}
-						<ChevronDown class="h-3 w-3.5" />
-					{/if}
-				</Popover.Trigger>
-
-				<Popover.Content
-					class="group/popover-content w-96 max-w-[calc(100vw-2rem)] p-0"
-					align="end"
-					sideOffset={8}
-					collisionPadding={16}
-				>
-					<div class="flex max-h-[50dvh] flex-col overflow-hidden">
-						<div
-							class="order-1 shrink-0 border-b p-4 group-data-[side=top]/popover-content:order-2 group-data-[side=top]/popover-content:border-t group-data-[side=top]/popover-content:border-b-0"
-						>
-							<SearchInput
-								id="model-search"
-								placeholder="Search models..."
-								bind:value={searchTerm}
-								bind:ref={searchInputRef}
-								onClose={() => handleOpenChange(false)}
-								onKeyDown={handleSearchKeyDown}
-							/>
-						</div>
-						<div
-							class="models-list order-2 min-h-0 flex-1 overflow-y-auto group-data-[side=top]/popover-content:order-1"
-						>
-							{#if !isCurrentModelInCache() && currentModel}
-								<button
-									type="button"
-									class="flex w-full cursor-not-allowed items-center bg-red-400/10 px-4 py-2 text-left text-sm text-red-400"
-									role="option"
-									aria-selected="true"
-									aria-disabled="true"
-									disabled
-								>
-									<span class="truncate">{selectedOption?.name || currentModel}</span>
-									<span class="ml-2 text-xs whitespace-nowrap opacity-70">(not available)</span>
-								</button>
-								<div class="my-1 h-px bg-border"></div>
-							{/if}
-							{#if filteredOptions.length === 0}
-								<p class="px-4 py-3 text-sm text-muted-foreground">No models found.</p>
-							{/if}
-							{#each filteredOptions as option, index (option.id)}
-								{@const status = getModelStatus(option.model)}
-								{@const isLoaded = status === ServerModelStatus.LOADED}
-								{@const isLoading = status === ServerModelStatus.LOADING}
-								{@const isSelected = currentModel === option.model || activeId === option.id}
-								{@const isCompatible = isModelCompatible(option)}
-								{@const isHighlighted = index === highlightedIndex}
-								{@const missingModalities = getMissingModalities(option)}
-
-								<div
-									class={cn(
-										'group flex w-full items-center gap-2 px-4 py-2 text-left text-sm transition focus:outline-none',
-										isCompatible
-											? 'cursor-pointer hover:bg-muted focus:bg-muted'
-											: 'cursor-not-allowed opacity-50',
-										isSelected || isHighlighted
-											? 'bg-accent text-accent-foreground'
-											: isCompatible
-												? 'hover:bg-accent hover:text-accent-foreground'
-												: '',
-										isLoaded ? 'text-popover-foreground' : 'text-muted-foreground'
-									)}
-									role="option"
-									aria-selected={isSelected || isHighlighted}
-									aria-disabled={!isCompatible}
-									tabindex={isCompatible ? 0 : -1}
-									onclick={() => isCompatible && handleSelect(option.id)}
-									onmouseenter={() => (highlightedIndex = index)}
-									onkeydown={(e) => {
-										if (isCompatible && (e.key === 'Enter' || e.key === ' ')) {
-											e.preventDefault();
-											handleSelect(option.id);
-										}
-									}}
-								>
-									<span class="min-w-0 flex-1 truncate">{option.model}</span>
-
-									{#if missingModalities}
-										<span class="flex shrink-0 items-center gap-1 text-muted-foreground/70">
-											{#if missingModalities.vision}
-												<Tooltip.Root>
-													<Tooltip.Trigger>
-														<EyeOff class="h-3.5 w-3.5" />
-													</Tooltip.Trigger>
-													<Tooltip.Content class="z-[9999]">
-														<p>No vision support</p>
-													</Tooltip.Content>
-												</Tooltip.Root>
-											{/if}
-											{#if missingModalities.audio}
-												<Tooltip.Root>
-													<Tooltip.Trigger>
-														<MicOff class="h-3.5 w-3.5" />
-													</Tooltip.Trigger>
-													<Tooltip.Content class="z-[9999]">
-														<p>No audio support</p>
-													</Tooltip.Content>
-												</Tooltip.Root>
-											{/if}
-										</span>
-									{/if}
-
-									{#if isLoading}
-										<Tooltip.Root>
-											<Tooltip.Trigger>
-												<Loader2 class="h-4 w-4 shrink-0 animate-spin text-muted-foreground" />
-											</Tooltip.Trigger>
-											<Tooltip.Content class="z-[9999]">
-												<p>Loading model...</p>
-											</Tooltip.Content>
-										</Tooltip.Root>
-									{:else if isLoaded}
-										<Tooltip.Root>
-											<Tooltip.Trigger>
-												<button
-													type="button"
-													class="relative ml-2 flex h-4 w-4 shrink-0 items-center justify-center"
-													onclick={(e) => {
-														e.stopPropagation();
-														modelsStore.unloadModel(option.model);
-													}}
-												>
-													<span
-														class="mr-2 h-2 w-2 rounded-full bg-green-500 transition-opacity group-hover:opacity-0"
-													></span>
-													<Power
-														class="absolute mr-2 h-4 w-4 text-red-500 opacity-0 transition-opacity group-hover:opacity-100 hover:text-red-600"
-													/>
-												</button>
-											</Tooltip.Trigger>
-											<Tooltip.Content class="z-[9999]">
-												<p>Unload model</p>
-											</Tooltip.Content>
-										</Tooltip.Root>
-									{:else}
-										<span class="mx-2 h-2 w-2 rounded-full bg-muted-foreground/50"></span>
-									{/if}
-								</div>
-							{/each}
-						</div>
-					</div>
-				</Popover.Content>
-			</Popover.Root>
-		{:else}
-			<button
-				class={cn(
-					`inline-flex cursor-default items-center gap-1.5 rounded-sm bg-muted-foreground/10 px-1.5 py-1 text-xs transition focus:outline-none`,
-					!isCurrentModelInCache()
-						? 'bg-red-400/10 !text-red-400 hover:bg-red-400/20 hover:text-red-400'
-						: forceForegroundText
-							? 'text-foreground'
-							: isHighlightedCurrentModelActive
-								? 'text-foreground'
-								: 'text-muted-foreground'
-				)}
-				style="max-width: min(calc(100cqw - 6.5rem), 32rem)"
-				disabled={disabled || updating}
-			>
-				<Package class="h-3.5 w-3.5" />
-
-				<span class="truncate font-medium">
-					{formatModelName(liveModelName || selectedOption?.model) || 'Select model'}
-				</span>
-
-				{#if updating}
-					<Loader2 class="h-3 w-3.5 animate-spin" />
-				{/if}
-			</button>
-		{/if}
-	{/if}
 </div>

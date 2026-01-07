@@ -8,7 +8,7 @@
 		message?: string;
 	}
 
-	let { class: className = '', message = 'Initializing connection to llama.cpp server...' }: Props =
+	let { class: className = '', message = 'Initializing connection to server...' }: Props =
 		$props();
 </script>
 

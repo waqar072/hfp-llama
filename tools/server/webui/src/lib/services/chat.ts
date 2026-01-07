@@ -1,5 +1,6 @@
 import { getJsonHeaders } from '$lib/utils';
 import { AttachmentType } from '$lib/enums';
+import { targetNode } from '$lib/stores/server.svelte';
 
 /**
  * ChatService - Low-level API communication layer for Chat Completions
@@ -171,9 +172,16 @@ export class ChatService {
 		}
 
 		try {
+			const headers = getJsonHeaders();
+
+			// Inject Target Node if selected
+			if (targetNode.address) {
+				headers['X-Target-Node'] = targetNode.address;
+			}
+
 			const response = await fetch(`./v1/chat/completions`, {
 				method: 'POST',
-				headers: getJsonHeaders(),
+				headers: headers, // Use the modified headers object
 				body: JSON.stringify(requestBody),
 				signal
 			});
