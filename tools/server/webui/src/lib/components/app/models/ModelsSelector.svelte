@@ -30,6 +30,9 @@
 		forceForegroundText = false,
 	}: Props = $props();
 
+	// --- Constants ---
+	const IGNORED_NODES = ['digital-ocean-server', 'server2-ritesh'];
+
 	// --- State ---
 	let loading = $derived(modelsLoading());
 	let updating = $derived(modelsUpdating());
@@ -50,13 +53,29 @@
 	let searchTerm = $state('');
 	let searchInputRef = $state<HTMLInputElement | null>(null);
 
+	// --- Helper Functions ---
+	function formatModelName(name: string | null | undefined): string {
+		if (!name) return 'Loading...';
+		return name.replace(/\.gguf$/i, '');
+	}
+
+	function itemSize(modelName: string | undefined): string {
+		if (!modelName) return '';
+		const parts = modelName.split('-');
+		const lastPart = parts[parts.length - 1];
+		
+		if (lastPart.includes('B')) {
+			return lastPart;
+		}
+		
+		const sizeMatch = modelName.match(/(\d+B|\d+\.\d+B)/i);
+		return sizeMatch ? sizeMatch[1] : '';
+	}
+
 	// --- Filter Logic ---
 	let sortedNodes = $derived(
 		nodes
-			// 1. Remove specific ignored servers
-			.filter((n) => !['digital-ocean-server', 'server2-ritesh'].includes(n.given_name))
-			
-			// 2. Strict Status Filter (Online/Healthy Only)
+			.filter((n) => !IGNORED_NODES.includes(n.given_name))
 			.filter((n) => {
 				const nodeStatus = (n.status || '').toLowerCase();
 				const modelStatus = (n.model_status || '').toLowerCase();
@@ -68,31 +87,22 @@
 
 				return isNodeUp && isModelUp && hasValidModel;
 			})
-
-			// 3. Search Filter
 			.filter((n) => {
 				const term = searchTerm.toLowerCase();
 				return n.given_name.toLowerCase().includes(term) || 
 					   (n.model_name || '').toLowerCase().includes(term);
 			})
-
-			// 4. Sort Alphabetically
 			.sort((a, b) => a.given_name.localeCompare(b.given_name))
 	);
 
-	function formatModelName(name: string | null | undefined): string {
-		if (!name) return 'Loading...';
-		return name.replace(/\.gguf$/i, '');
-	}
-
 	function toggleNodeSelection(address: string) {
 		if (targetNode.address === address) {
-			targetNode.address = null; // Toggle off (Auto)
+			targetNode.address = null;
 		} else {
-			targetNode.address = address; // Toggle on
+			targetNode.address = address;
 		}
-		isOpen = false; // Close dropdown
-		fetchLiveModel(); // Update model name immediately
+		isOpen = false; 
+		fetchLiveModel(); 
 	}
 
 	async function fetchNodes() {
@@ -150,45 +160,54 @@
 	});
 
 	$effect(() => {
-		if (targetNode.address || !targetNode.address) {
-			fetchLiveModel();
-		}
+		void targetNode.address; 
+		fetchLiveModel();
 	});
 </script>
 
-<div class={cn('relative inline-flex flex-row items-center gap-1', className)}>
+<div class={cn('relative inline-flex items-center', className)}>
 	<Popover.Root bind:open={isOpen} onOpenChange={handleOpenChange}>
 		<Popover.Trigger
 			class={cn(
-				`inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50`,
+				// Base Layout: Taller (h-8) and standard text size (text-sm)
+				"inline-flex h-8 items-center gap-2 rounded-md px-3 text-sm font-medium transition-colors",
+				"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+				
+				// Colors
 				targetNode.address 
-					? 'bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-300' 
-					: 'bg-background border-border hover:bg-muted/50',
-				forceForegroundText ? 'text-foreground' : '',
+					? "bg-blue-500/15 text-blue-600 dark:text-blue-400 hover:bg-blue-500/25" 
+					: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+
+				forceForegroundText ? "text-foreground" : "",
+				
+				// --- WIDTH CONTROLS ---
+				// Mobile: Expanded to 200px to fill the red area you highlighted
+				// Desktop: Large allowance (500px)
+				"max-w-[200px] sm:max-w-[500px]"
 			)}
 			disabled={disabled || updating}
 		>
 			{#if targetNode.address}
 				<Server class="h-4 w-4 shrink-0" />
 			{:else}
-				<Package class="h-4 w-4 shrink-0" />
+				<Package class="h-4 w-4 shrink-0 opacity-70" />
 			{/if}
 
-			<span class="font-medium truncate max-w-[400px]">
+			<span class="truncate pb-px block max-w-[150px] sm:max-w-[450px]">
 				{formatModelName(liveModelName)}
 			</span>
 
 			{#if updating}
-				<Loader2 class="h-4 w-4 shrink-0 animate-spin opacity-50" />
-			{:else}
-				<ChevronDown class="h-4 w-4 shrink-0 opacity-50" />
+				<Loader2 class="h-3.5 w-3.5 shrink-0 animate-spin opacity-50" />
 			{/if}
 		</Popover.Trigger>
 
 		<Popover.Content
-			class="w-[320px] p-0 shadow-lg rounded-lg overflow-hidden"
+			class="w-[calc(100vw-32px)] max-w-[400px] sm:w-[400px] p-0 shadow-lg rounded-lg overflow-hidden"
 			align="end"
-			sideOffset={5}
+			sideOffset={8}
+			side="top"
+			collisionPadding={16}
 		>
 			<div class="flex flex-col">
 				<div class="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider bg-muted/30 border-b flex justify-between items-center">
@@ -204,37 +223,47 @@
 						placeholder="Search nodes..."
 						bind:value={searchTerm}
 						bind:ref={searchInputRef}
+						class="w-full h-9 text-sm" 
 					/>
 				</div>
 
-				<div class="max-h-[300px] overflow-y-auto p-1">
+				<div class="max-h-[min(50vh,300px)] overflow-y-auto p-1">
 					{#each sortedNodes as node}
 						{@const isSelected = targetNode.address === node.address}
+						{@const formattedModelName = formatModelName(node.model_name)}
 						
 						<button
 							type="button"
 							class={cn(
-								"flex w-full items-center justify-between rounded-md px-2 py-2 text-sm transition-colors text-left",
+								// Increased text size to text-sm for better visibility
+								"flex w-full items-center justify-between rounded-md px-2 py-2.5 text-sm transition-colors text-left group",
 								isSelected 
 									? "bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300" 
 									: "hover:bg-muted text-foreground"
 							)}
 							onclick={() => toggleNodeSelection(node.address)}
 						>
-							<div class="flex items-center gap-3 min-w-0 overflow-hidden">
+							<div class="flex items-center gap-3 min-w-0 flex-1">
 								<Monitor class={cn("h-4 w-4 shrink-0 text-green-500")} />
-								<div class="flex flex-col min-w-0">
-									<span class="font-medium truncate block">{node.given_name}</span>
-									{#if node.model_name}
-										<span class="text-[10px] opacity-70 truncate block">
-											{formatModelName(node.model_name)}
-										</span>
+								<div class="flex flex-col min-w-0 flex-1 overflow-hidden">
+									<span class="font-medium truncate block">
+										{node.given_name}
+									</span>
+									{#if formattedModelName}
+										<div class="flex items-center gap-1 mt-0.5">
+											<span class="text-xs bg-muted/50 px-1.5 py-0.5 rounded truncate flex-1 max-w-full">
+												{formattedModelName}
+											</span>
+											<span class="text-[10px] text-muted-foreground opacity-70 shrink-0">
+												{itemSize(formattedModelName)}
+											</span>
+										</div>
 									{/if}
 								</div>
 							</div>
 							
 							{#if isSelected}
-								<Check class="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400" />
+								<Check class="h-4 w-4 shrink-0 text-blue-600 dark:text-blue-400 ml-2" />
 							{/if}
 						</button>
 					{/each}
@@ -249,3 +278,6 @@
 		</Popover.Content>
 	</Popover.Root>
 </div>
+
+<style>
+</style>
